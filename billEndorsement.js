@@ -24,8 +24,8 @@ class BillEndorsementModule {
     init() {
         this.renderPreviewBtn.addEventListener('click', () => this.renderPdfPreview());
         this.validateNegoBtn.addEventListener('click', () => this.validateNegotiability());
-        this.canvas.addEventListener('click', (e) => this.placeEndorsement(e));
-        this.saveBtn.addEventListener('click', () => this.saveEndorsedPdf());
+        // The save button now triggers the backend processing workflow
+        this.saveBtn.addEventListener('click', () => this.processBillOnBackend());
         this.nonNegoBtn.addEventListener('click', () => this.generateNonNegotiableNotice());
 
         this.billUploadInput.addEventListener('change', (e) => {
@@ -100,65 +100,42 @@ class BillEndorsementModule {
         }
     }
 
-    placeEndorsement(e) {
-        if (!this.appState.pdfPage || !this.appState.pdfViewport) {
-            this.utils.setStatus('Please render a preview first.', true);
-            return;
-        }
-
-        const rect = this.canvas.getBoundingClientRect();
-        const x = e.clientX - rect.left;
-        const y = e.clientY - rect.top;
-
-        const renderContext = { canvasContext: this.ctx, viewport: this.appState.pdfViewport };
-        this.appState.pdfPage.render(renderContext).promise.then(() => {
-            const fullEndorsementText = `${this.endorsementText.value} ${this.qualifierSelect.value}`;
-            this.ctx.font = '12px Helvetica';
-            this.ctx.fillStyle = 'blue';
-            this.ctx.fillText(fullEndorsementText, x, y);
-        });
-
-        const pdfPoint = this.appState.pdfViewport.convertToPdfPoint(x, y);
-        this.appState.endorsementCoords = { x: pdfPoint[0], y: pdfPoint[1] };
-
-        this.utils.setStatus('Endorsement placed. You can now save the PDF.', false);
-        this.utils.logAction('Endorsement placed on preview.');
-        this.saveBtn.disabled = false;
-    }
-
-    async saveEndorsedPdf() {
-        if (!this.appState.billFile || !this.appState.endorsementCoords) {
-            this.utils.setStatus('Please upload a bill and place an endorsement on the preview first.', true);
+    async processBillOnBackend() {
+        if (!this.appState.billFile) {
+            this.utils.setStatus('Please upload a bill/instrument first.', true);
             return;
         }
 
         this.utils.showLoader();
+        this.utils.setStatus('Processing bill on the server...', false);
+
+        const formData = new FormData();
+        formData.append('bill', this.appState.billFile);
+
         try {
-            const { PDFDocument, rgb, StandardFonts } = PDFLib;
-
-            const existingPdfBytes = await this.appState.billFile.arrayBuffer();
-            const pdfDoc = await PDFDocument.load(existingPdfBytes);
-            const helveticaFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
-            const firstPage = pdfDoc.getPages()[0];
-
-            const fullEndorsementText = `${this.endorsementText.value} ${this.qualifierSelect.value}`;
-            const { x, y } = this.appState.endorsementCoords;
-
-            firstPage.drawText(fullEndorsementText, {
-                x,
-                y,
-                font: helveticaFont,
-                size: 12,
-                color: rgb(0, 0, 0),
+            const response = await fetch('/endorse-bill', {
+                method: 'POST',
+                body: formData,
             });
 
-            const pdfBytes = await pdfDoc.save();
-            this.utils.generateDownload(pdfBytes, `${this.appState.billFile.name.replace(/\.pdf$/i, '')}_endorsed.pdf`, 'application/pdf');
-            this.utils.logAction('Endorsed PDF saved.');
+            const result = await response.json();
+
+            if (!response.ok) {
+                throw new Error(result.error || 'An unknown error occurred.');
+            }
+
+            this.utils.setStatus(result.message || 'Bill processed successfully!', false);
+            this.utils.logAction('Backend processing complete.');
+            
+            // Optionally, provide download links for the endorsed files
+            if (result.endorsed_files && result.endorsed_files.length > 0) {
+                this.utils.logAction(`Endorsed files created: ${result.endorsed_files.join(', ')}`);
+                // Here you could add logic to display download links to the user
+            }
 
         } catch (error) {
-            console.error('Error saving endorsed PDF:', error);
-            this.utils.setStatus('An error occurred while saving the PDF.', true);
+            console.error('Error processing bill:', error);
+            this.utils.setStatus(`Error: ${error.message}`, true);
         } finally {
             this.utils.hideLoader();
         }
